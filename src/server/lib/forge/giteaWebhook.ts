@@ -53,7 +53,7 @@ export function parseGiteaDelivery(
   };
   // Some Gitea versions send the specific event in X-Gitea-Event; accept either
   // representation, but never infer it from GitHub compatibility headers.
-  const action = actions[eventType]?.[body?.action] || actions[event || '']?.[body?.action];
+  const action = actions[eventType || '']?.[body?.action];
   if (!action) return null;
 
   const repositoryFullName = body?.repository?.full_name;
