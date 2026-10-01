@@ -389,7 +389,7 @@ export default class RepositoryService extends BaseService {
   }
 
   private async getActiveOnboardedRepositories(installationId?: number): Promise<Repository[]> {
-    const query = this.db.models.Repository.query().whereNull('deletedAt');
+    const query = this.db.models.Repository.query().whereNull('deletedAt').where('forgeProvider', 'github');
     if (installationId) {
       query.where('githubInstallationId', installationId);
     }
@@ -428,7 +428,7 @@ export default class RepositoryService extends BaseService {
   }: ListRepositoriesOptions = {}): Promise<RepositoryListResult<RepositoryResponse>> {
     const normalizedQuery = this.normalizeQuery(query);
     const githubInstallationId = installationId == null ? null : this.resolveInstallationId(installationId);
-    const repositoryQuery = this.db.models.Repository.query().whereNull('deletedAt');
+    const repositoryQuery = this.db.models.Repository.query().whereNull('deletedAt').where('forgeProvider', 'github');
 
     if (githubInstallationId) {
       repositoryQuery.where('githubInstallationId', githubInstallationId);
@@ -633,6 +633,7 @@ export default class RepositoryService extends BaseService {
     try {
       const query = this.db.models.Repository.query()
         .whereNull('deletedAt')
+        .where('forgeProvider', 'github')
         .whereRaw('lower("fullName") = ?', [normalizedFullName]);
 
       if (githubInstallationId) {

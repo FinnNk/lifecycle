@@ -18,6 +18,9 @@ import Model from './_Model';
 import { PullRequest, Environment } from '.';
 
 export default class Repository extends Model {
+  forgeProvider: 'github' | 'gitea';
+  forgeInstance: string | null;
+  forgeRepositoryId: string | null;
   githubRepositoryId: number;
   githubInstallationId: number;
   ownerId: number;

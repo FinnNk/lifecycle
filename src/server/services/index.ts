@@ -17,6 +17,7 @@
 import BuildService from 'server/services/build';
 import Environment from 'server/services/environment';
 import GithubService from 'server/services/github';
+import GiteaService from 'server/services/gitea';
 import PullRequest from 'server/services/pullRequest';
 import Repository from 'server/services/repository';
 import Deploy from 'server/services/deploy';
@@ -39,6 +40,7 @@ export default function createAndBindServices(): IServices {
     BuildService: new BuildService(),
     Environment: new Environment(),
     GithubService: new GithubService(),
+    GiteaService: new GiteaService(),
     PullRequest: new PullRequest(),
     Repository: new Repository(),
     Deploy: new Deploy(),

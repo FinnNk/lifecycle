@@ -92,6 +92,7 @@ export const GITHUB_API_REQUEST_INTERVAL = getServerRuntimeConfig('GITHUB_API_RE
 
 export const QUEUE_NAMES = {
   WEBHOOK_PROCESSING: `webhook_processing_${JOB_VERSION}`,
+  GITEA_WEBHOOK_PROCESSING: `gitea_webhook_processing_${JOB_VERSION}`,
   COMMENT_QUEUE: `comment_queue_${JOB_VERSION}`,
   CLEANUP: `cleanup_${JOB_VERSION}`,
   // NOTE: No version suffix - singleton queue shared across app instances
