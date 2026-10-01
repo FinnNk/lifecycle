@@ -21,6 +21,7 @@ import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
 import { getLogArchivalService } from '../../../services/logArchival';
 import { createNativeBuildRegistryAuthSecret, deleteNativeBuildRegistryAuthSecret } from '../registryAuth';
+import { createForgeCloneSecret, deleteForgeCloneSecret } from '../forgeClone';
 
 const mockArchiveLogs = jest.fn();
 
@@ -50,6 +51,10 @@ jest.mock('../registryAuth', () => {
     createNativeBuildRegistryAuthSecret: jest.fn(),
     deleteNativeBuildRegistryAuthSecret: jest.fn(),
   };
+});
+jest.mock('../forgeClone', () => {
+  const actual = jest.requireActual('../forgeClone');
+  return { ...actual, createForgeCloneSecret: jest.fn(), deleteForgeCloneSecret: jest.fn() };
 });
 jest.mock('../../../models', () => ({
   Build: {
@@ -132,6 +137,8 @@ describe('buildkitBuild', () => {
     (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
     (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
     (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (createForgeCloneSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteForgeCloneSecret as jest.Mock).mockResolvedValue(undefined);
 
     (shellPromise as jest.Mock).mockResolvedValue('');
 
@@ -153,6 +160,29 @@ describe('buildkitBuild', () => {
     const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
     expect(applyCall).toBeDefined();
     expect(applyCall[0]).toContain("cat <<'EOF' | kubectl apply -f -");
+  });
+
+  it('pins a Gitea clone to its SHA and keeps the token out of the Job manifest', async () => {
+    const revision = 'a'.repeat(40);
+    const cloneAccess = {
+      url: 'https://gitea.example.test/contributor/app.git',
+      username: 'lifecycle-bot',
+      password: 'private-gitea-token',
+      caPem: '-----BEGIN CERTIFICATE-----\nexample\n-----END CERTIFICATE-----',
+    };
+    const result = await buildkitBuild(mockDeploy, { ...mockOptions, revision, cloneAccess });
+    expect(result.success).toBe(true);
+    expect(getGitHubToken).not.toHaveBeenCalled();
+    expect(createForgeCloneSecret).toHaveBeenCalledWith(mockOptions.namespace, expect.any(String), cloneAccess);
+    const secretName = (createForgeCloneSecret as jest.Mock).mock.calls[0][1];
+    const apply = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'))[0];
+    expect(apply).toContain(revision);
+    expect(apply).toContain(secretName);
+    expect(apply).toContain('GIT_SSL_CAINFO');
+    expect(apply).not.toContain(cloneAccess.password);
+    expect(apply).not.toContain(cloneAccess.username);
+    expect(apply).not.toContain(cloneAccess.caPem);
+    expect(deleteForgeCloneSecret).toHaveBeenCalledWith(mockOptions.namespace, secretName);
   });
 
   it('uses custom buildkit configuration from global config', async () => {

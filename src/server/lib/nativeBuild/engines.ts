@@ -28,6 +28,14 @@ import { createBuildJob } from '../kubernetes/jobFactory';
 import { buildNativeBuildJobName } from '../kubernetes/jobNames';
 import * as yaml from 'js-yaml';
 import { getLogArchivalService } from '../../services/logArchival';
+import type { ForgeCloneAccess } from 'server/lib/forge/types';
+import {
+  createForgeCloneContainer,
+  createForgeCloneSecret,
+  deleteForgeCloneSecret,
+  forgeCloneSecretName,
+  forgeCloneVolumes,
+} from './forgeClone';
 import {
   buildNativeBuildRegistryAuthSecretName,
   createKanikoRegistryAuthMergeInitContainer,
@@ -53,6 +61,8 @@ export interface NativeBuildOptions {
   revision: string;
   repo: string;
   branch: string;
+  /** Ephemeral provider credentials, never serialised into the Job manifest. */
+  cloneAccess?: ForgeCloneAccess;
   initDockerfilePath?: string;
   initTag?: string;
   namespace: string;
@@ -354,16 +364,16 @@ export async function buildWithEngine(
 
   getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath}`);
 
-  const githubToken = await getGitHubToken();
-  const gitUsername = 'x-access-token';
-
-  const gitCloneContainer = createRepoSpecificGitCloneContainer(
-    options.repo,
-    options.revision,
-    contextPath,
-    gitUsername,
-    githubToken
-  );
+  const cloneSecretName = options.cloneAccess ? forgeCloneSecretName(jobName) : null;
+  const gitCloneContainer = options.cloneAccess
+    ? createForgeCloneContainer(options.cloneAccess, options.revision, contextPath, cloneSecretName)
+    : createRepoSpecificGitCloneContainer(
+        options.repo,
+        options.revision,
+        contextPath,
+        'x-access-token',
+        await getGitHubToken()
+      );
 
   let registryLoginScript = '';
   const registryDomain = options.ecrDomain;
@@ -515,6 +525,7 @@ export async function buildWithEngine(
         emptyDir: {},
       },
       ...(registryAuthSecretName ? createRegistryAuthVolumes(registryAuthSecretName) : []),
+      ...(cloneSecretName ? forgeCloneVolumes(cloneSecretName, Boolean(options.cloneAccess?.caPem)) : []),
     ],
     podAnnotations,
   });
@@ -522,8 +533,13 @@ export async function buildWithEngine(
   const jobYaml = yaml.dump(job, { quotingType: '"', forceQuotes: true });
   const logArchivalEnabled = globalConfig.logArchival?.enabled;
   let registryAuthSecretCreated = false;
+  let cloneSecretCreated = false;
 
   try {
+    if (cloneSecretName && options.cloneAccess) {
+      await createForgeCloneSecret(options.namespace, cloneSecretName, options.cloneAccess);
+      cloneSecretCreated = true;
+    }
     if (registryAuthSecretName) {
       await createNativeBuildRegistryAuthSecret({
         namespace: options.namespace,
@@ -620,6 +636,9 @@ EOF`);
       return { success: false, logs: `Build failed: ${error.message}`, jobName };
     }
   } finally {
+    if (cloneSecretCreated && cloneSecretName) {
+      await deleteForgeCloneSecret(options.namespace, cloneSecretName);
+    }
     if (registryAuthSecretCreated && registryAuthSecretName) {
       await deleteNativeBuildRegistryAuthSecret(options.namespace, registryAuthSecretName);
     }

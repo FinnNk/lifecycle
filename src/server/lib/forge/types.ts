@@ -37,6 +37,7 @@ export interface ForgeCloneAccess {
   url: string;
   username: string;
   password: string;
+  caPem?: string;
 }
 
 export interface ForgeProvider {

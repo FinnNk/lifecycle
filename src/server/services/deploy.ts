@@ -34,6 +34,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { PatternInfo, extractEnvVarsWithBuildDependencies, waitForColumnValue } from 'shared/utils';
 import { getLogs } from 'server/lib/codefresh';
 import { buildWithNative } from 'server/lib/nativeBuild';
+import { getPinnedGiteaPullRequestSource } from 'server/lib/forge/pullRequestSource';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
@@ -1099,15 +1100,19 @@ export default class DeployService extends BaseService {
       await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.CLONING }, runUUID);
 
       await deployable.$fetchGraph('repository');
-      await build?.$fetchGraph('pullRequest');
-      const repository = deployable?.repository;
+      await build?.$fetchGraph('pullRequest.[repository]');
+      const giteaSource = await getPinnedGiteaPullRequestSource(build?.pullRequest);
+      if (giteaSource && (!isNativeBuilderEngine(deployable.builder?.engine) || deployable.repositoryId != null)) {
+        throw new Error('Gitea first release supports only a native build from the PR repository');
+      }
+      const repository = deployable?.repository ?? (giteaSource ? build.pullRequest.repository : null);
 
       if (!repository) {
         throw this.sourceResolutionFailure(null, deploy.branchName);
       }
 
-      const repo = repository?.fullName;
-      const fullSha = await this.resolveSourceSha(
+      const repo = giteaSource?.fullName ?? repository?.fullName;
+      const fullSha = giteaSource?.sha ?? await this.resolveSourceSha(
         deploy,
         repo,
         deploy.branchName,
@@ -1116,7 +1121,7 @@ export default class DeployService extends BaseService {
         sourceBranch
       );
 
-      const repositoryName: string = deployable.repository.fullName;
+      const repositoryName: string = giteaSource?.fullName ?? deployable.repository.fullName;
       const branchName: string = deploy.branchName;
       const dockerfilePath: string = deployable.dockerfilePath;
       const initDockerfilePath: string = deployable.initDockerfilePath;
@@ -1245,6 +1250,7 @@ export default class DeployService extends BaseService {
             secretRefs: syncedExternalSecrets.secretNames,
             secretEnvKeys: Array.from(syncedExternalSecrets.buildSecretEnvKeys),
             ...(nativeServiceAccount ? { serviceAccount: nativeServiceAccount } : {}),
+            ...(giteaSource ? { cloneAccess: giteaSource.cloneAccess } : {}),
           };
 
           if (!initDockerfilePath) {
