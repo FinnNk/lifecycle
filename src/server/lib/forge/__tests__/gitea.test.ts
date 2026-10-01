@@ -12,7 +12,7 @@ const headRepository = { id: 43, full_name: 'contributor/app', html_url: 'https:
 
 describe('Gitea provider', () => {
   it('requires HTTPS and complete credentials', () => {
-    expect(giteaConfigFromEnvironment({})).toBeNull();
+    expect(giteaConfigFromEnvironment({} as NodeJS.ProcessEnv)).toBeNull();
     expect(() => new GiteaProvider({ ...config, baseUrl: 'http://gitea.example.test' })).toThrow('HTTPS');
     expect(() => new GiteaProvider({ ...config, baseUrl: 'http://gitea.example.test', allowHttp: true })).toThrow('HTTPS');
     expect(() => new GiteaProvider({ ...config, baseUrl: 'http://localhost:3000', allowHttp: true })).not.toThrow();
