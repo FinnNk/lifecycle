@@ -30,6 +30,11 @@ global:
     readOnlyRootFilesystem: false
     runAsNonRoot: false
 
+  # Optional: mount a trusted Gitea CA Secret into the web and worker pods.
+  gitea:
+    caSecretName: ''
+    caSecretKey: ca.pem
+
   env:
     - name: JOB_VERSION
       value: default
