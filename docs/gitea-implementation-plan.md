@@ -2,6 +2,8 @@
 
 Upstream baseline: `479a4a07476de474259580d8db59807770ca98da`.
 
+Installation, webhook setup, secret rotation and the isolated demonstration record are in the [Gitea operations guide](gitea-operations.md).
+
 Current branch status: the forge adapter, native Gitea webhook route, retrying delivery queue and provider identity columns are implemented. The worker stores the live PR state, exact head SHA and source fork identity. It queues teardown for an existing build when the live PR is closed or loses its deploy label. Configuration lookup for a Gitea PR is pinned to its head SHA, including a source fork. The native builder can clone that fork at the stored SHA after checking the live PR, with credentials in an ephemeral Kubernetes Secret and the configured CA mounted into the clone container. An enabled PR creates a build, signals the existing reconciliation queue with an idempotent head token, and posts a marked Gitea status comment with service URLs. The TTL scanner checks the live Gitea PR, honours the keep and disabled labels, and expires a lease through the existing deletion queue. This batch pins the root service to the PR branch and rejects unsupported service sources. The path has unit coverage but has not yet been demonstrated against a running Gitea and Kubernetes setup.
 
 ## Existing path

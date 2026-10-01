@@ -7,6 +7,8 @@ lifecycle is a tool that transforms pull requests into ephemeral development env
 
 [Get started here](https://goodrxoss.github.io/lifecycle-docs)
 
+For this fork's self-managed Gitea PR integration, see the [Gitea operations guide](docs/gitea-operations.md). The isolated end-to-end demonstration is still pending.
+
 **Lifecycle in action**
 
 [Watch it on youtube](https://youtu.be/ld9rWBPU3R8)
