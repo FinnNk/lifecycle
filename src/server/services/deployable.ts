@@ -124,6 +124,16 @@ export interface DeployableAttributes {
 }
 
 export default class DeployableService extends BaseService {
+  private assertGiteaServiceScope(service: YamlService.Service, repository: Repository): void {
+    if (repository.forgeProvider !== 'gitea') return;
+    if (![DeployTypes.GITHUB, DeployTypes.DOCKER].includes(YamlService.getDeployType(service))) {
+      throw new Error('Gitea first release supports only native source and Docker services');
+    }
+    const serviceRepository = YamlService.getRepositoryName(service);
+    if (serviceRepository && serviceRepository.toLowerCase() !== repository.fullName.toLowerCase()) {
+      throw new Error('Gitea first release does not support cross-repository services');
+    }
+  }
   private isYamlReconcileEligible(type: string): boolean {
     return type !== DeployTypes.CONFIGURATION;
   }
@@ -140,7 +150,7 @@ export default class DeployableService extends BaseService {
   private async generateAttributesFromYamlConfig(
     buildId: number,
     buildUUID: string,
-    repositoryId: number,
+    repositoryId: number | null,
     branch: string,
     service: YamlService.Service,
     active: boolean,
@@ -356,7 +366,7 @@ export default class DeployableService extends BaseService {
     buildId: number,
     buildUUID: string,
     service: YamlService.Service,
-    repositoryId: number,
+    repositoryId: number | null,
     branchName: string,
     active: boolean,
     parentDeployableName: string,
@@ -366,7 +376,14 @@ export default class DeployableService extends BaseService {
       let repository: Repository;
       let branch: string;
       const repoName: string = YamlService.getRepositoryName(service);
-      if (repoName != null) {
+      const deployType = YamlService.getDeployType(service);
+      if (repositoryId == null && build) await build.$fetchGraph('pullRequest.[repository]');
+      const giteaRoot = repositoryId == null && build?.pullRequest?.repository?.forgeProvider === 'gitea';
+      if (giteaRoot) this.assertGiteaServiceScope(service, build.pullRequest.repository);
+      if (giteaRoot) {
+        repository = build.pullRequest.repository;
+        branch = branchName;
+      } else if (repoName != null) {
         repository = await YamlService.resolveRepository(YamlService.getRepositoryName(service));
 
         if (repository != null) {
@@ -388,7 +405,6 @@ export default class DeployableService extends BaseService {
 
       // Docker and aurora-restore services have no repository field; they belong to the repo whose config defines
       // them, the same as a helm or github service whose repository is that config's own repo.
-      const deployType = YamlService.getDeployType(service);
       const inheritsConfigRepository =
         repoName == null && (deployType === DeployTypes.DOCKER || deployType === DeployTypes.AURORA_RESTORE);
 
@@ -530,6 +546,9 @@ export default class DeployableService extends BaseService {
                 let deploy: Deploy;
                 // Service defined in remote repo. Need to fetch remote YAML
                 if (yamlEnvService?.repository != null) {
+                  if (rootRepository.forgeProvider === 'gitea') {
+                    throw new Error('Gitea first release does not support cross-repository YAML dependencies');
+                  }
                   // Skip remote services that don't match the triggering repository.
                   // This avoids re-fetching all remote YAMLs on a targeted push, while
                   // still updating the service whose repo actually changed.
@@ -591,6 +610,7 @@ export default class DeployableService extends BaseService {
 
                   if (resolvedService != null) {
                     const yamlService = resolvedService.service;
+                    this.assertGiteaServiceScope(yamlService, rootRepository);
                     if (yamlService.requires != null) {
                       // Just like Database config, we only handle 1 level deep inner dependency
                       await Promise.all(
@@ -722,6 +742,7 @@ export default class DeployableService extends BaseService {
               const legacyRootBranch = rootBranch;
               await Promise.all(
                 yamlConfig.services.map(async (service) => {
+                  this.assertGiteaServiceScope(service, legacySourceRepository);
                   // Handling older schema
                   // For each of the yaml service definition, merge with db configuration
                   deployableServices.set(

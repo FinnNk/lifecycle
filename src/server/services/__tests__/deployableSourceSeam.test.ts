@@ -77,6 +77,23 @@ const makeService = () => {
 afterEach(() => jest.clearAllMocks());
 
 describe('deployable source seam (PR vs API build)', () => {
+  it('rejects a Gitea cross-repository YAML dependency before fetching another ref', async () => {
+    const service = makeService();
+    const repository = { forgeProvider: 'gitea', githubRepositoryId: null, fullName: 'org/root' };
+    const pullRequest: any = { branchName: 'feature', latestCommit: 'a'.repeat(40), repository,
+      build: { deploys: [], environment: { id: 5 } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined) };
+    mockFetchLifecycleConfigByRepository.mockResolvedValue({
+      environment: { defaultServices: [{ name: 'other', repository: 'org/other' }], optionalServices: [] },
+      services: [],
+    });
+    await expect((service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(), 1, 'uuid-1', pullRequest, { id: 1 }
+    )).rejects.toThrow('cross-repository YAML dependencies');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledTimes(1);
+    expect(mockResolveRepository).not.toHaveBeenCalled();
+  });
+
   it('resolves lifecycle.yaml from the PR repository and branch for PR builds', async () => {
     const service = makeService();
     const repository = { githubRepositoryId: 42, fullName: 'org/repo' };
@@ -93,7 +110,7 @@ describe('deployable source seam (PR vs API build)', () => {
     });
 
     expect(pullRequest.$fetchGraph).toHaveBeenCalledWith('[build.[deploys.[deployable], environment], repository]');
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'feature-1');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'feature-1', undefined);
     expect(mockRepositoryFindOne).not.toHaveBeenCalled();
     expect(result).toBe(false);
   });
@@ -117,7 +134,7 @@ describe('deployable source seam (PR vs API build)', () => {
 
     expect(build.$fetchGraph).toHaveBeenCalledWith('[deploys.[deployable], environment]');
     expect(mockRepositoryFindOne).toHaveBeenCalledWith({ githubRepositoryId: 42 });
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'main');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'main', undefined);
     expect(result).toBe(false);
   });
 
@@ -139,7 +156,7 @@ describe('deployable source seam (PR vs API build)', () => {
 
     await (service as any).updateOrCreateDeployableUsingYamlConfig(new Map(), 9, 'uuid-9', null, build);
 
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'create-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'create-sha', undefined);
   });
 
   it('uses the pushed source ref for a later auto-track run', async () => {
@@ -174,7 +191,7 @@ describe('deployable source seam (PR vs API build)', () => {
       'main'
     );
 
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'push-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'push-sha', undefined);
   });
 
   it('does not use a dependency push SHA to fetch the root API lifecycle config', async () => {
@@ -211,7 +228,7 @@ describe('deployable source seam (PR vs API build)', () => {
       'main'
     );
 
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha', undefined);
   });
 
   it('fetches a targeted dependency config at the same pushed SHA used for its code', async () => {
@@ -261,7 +278,7 @@ describe('deployable source seam (PR vs API build)', () => {
       'main'
     );
 
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(rootRepository, 'root-config-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(rootRepository, 'root-config-sha', undefined);
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(dependencyRepository, 'dependency-push-sha');
     expect(service.updateOrCreateDeployableAttributesUsingYAMLConfig).toHaveBeenCalledWith(
       expect.any(Map),
@@ -308,7 +325,7 @@ describe('deployable source seam (PR vs API build)', () => {
       42
     );
 
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-push-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-push-sha', undefined);
   });
 
   it('targets a same-repository dependency by its exact effective branch and preserves the configured branch', async () => {
@@ -361,7 +378,7 @@ describe('deployable source seam (PR vs API build)', () => {
     );
 
     expect(result).toBe(true);
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenNthCalledWith(1, repository, 'root-config-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenNthCalledWith(1, repository, 'root-config-sha', undefined);
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenNthCalledWith(2, repository, 'stable-push-sha');
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledTimes(2);
     expect(service.updateOrCreateDeployableAttributesUsingYAMLConfig).toHaveBeenCalledWith(
@@ -970,7 +987,7 @@ describe('deployable source seam (PR vs API build)', () => {
     );
 
     expect(result).toBe(true);
-    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(rootRepository, 'root-push-sha');
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(rootRepository, 'root-push-sha', undefined);
   });
 
   it('imports legacy top-level services when the environment lists no default or optional services', async () => {
