@@ -50,6 +50,7 @@ import GlobalConfigService from './globalConfig';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import BuildMetadataService from './buildMetadata';
 import { toPublicHref } from 'server/lib/publicHref';
+import { GiteaProvider, giteaConfigFromEnvironment } from 'server/lib/forge/gitea';
 
 const createDeployMessage = async () => {
   const deployLabel = await getDeployLabel();
@@ -71,7 +72,7 @@ export default class ActivityStream extends BaseService {
   });
 
   processComments = async (job) => {
-    const { id, sender, correlationId, _ddTraceContext, targetGithubRepositoryId } = job.data;
+    const { id, sender, correlationId, _ddTraceContext, targetGithubRepositoryId, giteaStatus } = job.data;
 
     return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
       try {
@@ -106,6 +107,7 @@ export default class ActivityStream extends BaseService {
           { error },
           `Comment: processing failed pullRequestId=${id}`
         );
+        if (giteaStatus) throw error;
       }
     });
   };
@@ -308,6 +310,45 @@ export default class ActivityStream extends BaseService {
     targetGithubRepositoryId?: number
   ) {
     if (build?.kind === BuildKind.SANDBOX) {
+      return;
+    }
+
+    if (repository?.forgeProvider === 'gitea') {
+      if (!updateStatus) return;
+      if (queue) {
+        await this.commentQueue.add('comment', {
+          id: pullRequest.id,
+          giteaStatus: true,
+          ...extractContextForQueue(),
+        }, {
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 2_000 },
+          removeOnComplete: true,
+          removeOnFail: true,
+        });
+        return;
+      }
+      const config = giteaConfigFromEnvironment();
+      if (!config || !repository.forgeInstance || !repository.forgeRepositoryId) {
+        throw new Error('Gitea comment configuration or repository identity is missing');
+      }
+      const urls = deploys.filter((deploy) => deploy.publicUrl).map((deploy) =>
+        `- ${deploy.deployable?.name ?? 'Service'}: ${deploy.publicUrl}`);
+      const body = [
+        `## Lifecycle environment: ${build.status}`,
+        `Commit: \`${pullRequest.latestCommit}\``,
+        LIFECYCLE_UI_URL ? `[Environment](${LIFECYCLE_UI_URL}/environments/${build.uuid})` : '',
+        ...urls,
+      ].filter(Boolean).join('\n\n');
+      const commentId = await new GiteaProvider(config).upsertPullRequestComment({
+        repository: {
+          provider: 'gitea',
+          instance: repository.forgeInstance,
+          repositoryId: repository.forgeRepositoryId,
+        },
+        number: pullRequest.pullRequestNumber,
+      }, '<!-- lifecycle-status -->', body, pullRequest.statusCommentId ?? undefined);
+      await pullRequest.$query().patch({ statusCommentId: commentId });
       return;
     }
 

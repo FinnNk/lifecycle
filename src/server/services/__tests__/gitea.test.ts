@@ -6,6 +6,8 @@ const getRepository = jest.fn();
 const getPullRequest = jest.fn();
 const add = jest.fn();
 const enqueueBuildDeletion = jest.fn();
+const createBuildAndDeploys = jest.fn();
+const enqueueResolveAndDeployBuild = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {}, defaultRedis: {}, defaultRedlock: {}, defaultQueueManager: {},
@@ -45,6 +47,8 @@ describe('Gitea current-state intake', () => {
   let service: GiteaService;
   let prPatch: jest.Mock;
   let existingPr: any;
+  let buildQuery: any;
+  let buildRow: any;
 
   beforeEach(() => {
     process.env.GITEA_REPOSITORY = 'example/app';
@@ -63,18 +67,21 @@ describe('Gitea current-state intake', () => {
     };
     const repositoryQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(repository) })) };
     const prQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockImplementation(async () => existingPr) })) };
-    const buildQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue({ id: 61 }) })) };
+    buildRow = { id: 61 };
+    buildQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockImplementation(async () => buildRow) })) };
     const db = {
       models: {
         Repository: { query: () => repositoryQuery }, PullRequest: { query: () => prQuery },
         Build: { query: () => buildQuery },
       },
-      services: { BuildService: { enqueueBuildDeletion } },
+      services: { BuildService: { enqueueBuildDeletion, createBuildAndDeploys, enqueueResolveAndDeployBuild } },
     };
     const queueManager = { registerQueue: jest.fn(() => ({ add })) };
     service = new GiteaService(db as any, {} as any, {} as any, queueManager as any);
     add.mockReset().mockResolvedValue(undefined);
     enqueueBuildDeletion.mockReset().mockResolvedValue(undefined);
+    createBuildAndDeploys.mockReset().mockResolvedValue(undefined);
+    enqueueResolveAndDeployBuild.mockReset().mockResolvedValue(undefined);
   });
 
   afterAll(() => {
@@ -98,6 +105,44 @@ describe('Gitea current-state intake', () => {
     expect(prPatch).toHaveBeenCalledWith(expect.objectContaining({
       status: 'open', latestCommit: 'b'.repeat(40), branchName: 'feature',
     }));
+    expect(enqueueBuildDeletion).not.toHaveBeenCalled();
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
+      buildId: 61,
+      runUUID: `gitea-4-19-${'b'.repeat(40)}`,
+    });
+  });
+
+  it('coalesces duplicate deliveries for the same head and queues a changed head', async () => {
+    await service.processWebhooks({ data: delivery });
+    await service.processWebhooks({ data: { ...delivery, deliveryId: '87654321-1234-1234-1234-123456789abc' } });
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(2);
+    expect(enqueueResolveAndDeployBuild.mock.calls[0][0].runUUID)
+      .toBe(enqueueResolveAndDeployBuild.mock.calls[1][0].runUUID);
+    expect(createBuildAndDeploys).not.toHaveBeenCalled();
+  });
+
+  it('creates the missing build and retries queue submission after PR state is saved', async () => {
+    buildRow = null;
+    createBuildAndDeploys.mockImplementationOnce(async () => { buildRow = { id: 62 }; });
+    enqueueResolveAndDeployBuild.mockRejectedValueOnce(new Error('queue unavailable'));
+    await expect(service.processWebhooks({ data: delivery })).rejects.toThrow('queue unavailable');
+    await service.processWebhooks({ data: delivery });
+    expect(createBuildAndDeploys).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: 4, pullRequestId: 19, environmentId: 7, repositoryBranchName: 'feature',
+    }));
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(2);
+    expect(enqueueResolveAndDeployBuild.mock.calls[0][0])
+      .toEqual(enqueueResolveAndDeployBuild.mock.calls[1][0]);
+  });
+
+  it('reclaims a torn-down build on a reopened PR at the same commit', async () => {
+    existingPr.deployOnUpdate = false;
+    buildRow = { id: 61, status: 'torn_down' };
+    await service.processWebhooks({ data: { ...delivery, action: 'reopened' } });
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
+      buildId: 61,
+      runUUID: `gitea-4-19-${'a'.repeat(40)}-${delivery.deliveryId}`,
+    });
     expect(enqueueBuildDeletion).not.toHaveBeenCalled();
   });
 

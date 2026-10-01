@@ -86,7 +86,7 @@ export default class DeployService extends BaseService {
     sourceBranch?: string | null,
     sourceGithubRepositoryId: number | null | undefined = githubRepositoryId
   ): Promise<Deploy[]> {
-    await build?.$fetchGraph('[deployables.[repository]]');
+    await build?.$fetchGraph('[deployables.[repository], pullRequest.[repository]]');
 
     const { deployables } = build;
 
@@ -103,7 +103,7 @@ export default class DeployService extends BaseService {
       deployables.map(async (deployable) => {
         const uuid = `${deployable.name}-${build?.uuid}`;
         const patchFields: Objection.PartialModelObject<Deploy> = {};
-        const deployableRepositoryId = Number(deployable.repositoryId);
+        const deployableRepositoryId = deployable.repositoryId == null ? null : Number(deployable.repositoryId);
         const effectiveBranch = deployable.commentBranchName ?? deployable.branchName;
         const isTargetSource =
           !githubRepositoryId ||
@@ -132,7 +132,7 @@ export default class DeployService extends BaseService {
           patchFields.uuid = uuid;
           patchFields.branchName = effectiveBranch;
           patchFields.tag = deployable.defaultTag;
-          if (deployable.repositoryId != null && Number(deploy.githubRepositoryId) !== deployableRepositoryId) {
+          if (deployableRepositoryId != null && Number(deploy.githubRepositoryId) !== deployableRepositoryId) {
             patchFields.githubRepositoryId = deployableRepositoryId;
           }
         } else {
@@ -155,10 +155,15 @@ export default class DeployService extends BaseService {
 
         if (isTargetSource && [DeployTypes.HELM, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(deployable.type)) {
           try {
-            const sha =
+            const isGiteaSource = deployableRepositoryId == null &&
+              build.pullRequest?.repository?.forgeProvider === 'gitea';
+            if (isGiteaSource && !build.pullRequest?.latestCommit) {
+              throw new Error('Gitea pull request head SHA is missing');
+            }
+            const sha = isGiteaSource ? build.pullRequest.latestCommit :
               this.getPinnedBuildSourceRef(
                 build,
-                deployableRepositoryId,
+                deployableRepositoryId ?? 0,
                 effectiveBranch,
                 sourceRef,
                 sourceGithubRepositoryId,

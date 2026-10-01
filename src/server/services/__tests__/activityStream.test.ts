@@ -44,6 +44,7 @@ const mockUnlock = jest.fn();
 const mockRenderDashboardMarkdown = jest.fn();
 const mockDetermineChartType = jest.fn();
 const mockIsStaging = jest.fn();
+const mockUpsertGiteaComment = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -109,6 +110,11 @@ jest.mock('server/lib/utils', () => ({
 jest.mock('server/lib/github', () => ({
   checkIfCommentExists: (...args: unknown[]) => mockCheckIfCommentExists(...args),
   createOrUpdatePullRequestComment: (...args: unknown[]) => mockCreateOrUpdatePullRequestComment(...args),
+}));
+
+jest.mock('server/lib/forge/gitea', () => ({
+  giteaConfigFromEnvironment: () => ({ baseUrl: 'https://gitea.example.test', token: 'secret', username: 'bot' }),
+  GiteaProvider: jest.fn().mockImplementation(() => ({ upsertPullRequestComment: mockUpsertGiteaComment })),
 }));
 
 jest.mock('server/lib/kubernetes', () => ({
@@ -244,6 +250,7 @@ function createDeploy({ deployable, ...overrides }: Record<string, any> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockUpsertGiteaComment.mockResolvedValue(99);
   mockDetermineChartType.mockResolvedValue('public');
   mockIsStaging.mockReturnValue(false);
   mockGetAllConfigs.mockResolvedValue({
@@ -267,6 +274,53 @@ beforeEach(() => {
   mockUnlock.mockResolvedValue(undefined);
   mockRedisDel.mockResolvedValue(1);
   mockRenderDashboardMarkdown.mockResolvedValue('dashboard details\n');
+});
+
+describe('Gitea status comments', () => {
+  it('queues Gitea updates with API retries', async () => {
+    const service = createActivityStream();
+    await service.updatePullRequestActivityStream(
+      createBuild() as any, [], createPullRequest() as any,
+      { forgeProvider: 'gitea' } as any, true, true
+    );
+    expect(mockCommentQueueAdd).toHaveBeenCalledWith('comment',
+      expect.objectContaining({ id: 17, giteaStatus: true }),
+      expect.objectContaining({ attempts: 5 }));
+    expect(mockUpsertGiteaComment).not.toHaveBeenCalled();
+
+    const pullRequest = createPullRequest({
+      build: createBuild(), repository: { forgeProvider: 'gitea' },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+    mockFindPullRequest.mockResolvedValue(pullRequest);
+    mockProcessActivityStreamUpdate.mockRejectedValueOnce(new Error('Gitea unavailable'));
+    await expect(service.processComments({ data: { id: 17, giteaStatus: true } }))
+      .rejects.toThrow('Gitea unavailable');
+  });
+
+  it('updates one marked PR comment with the build status and service URL', async () => {
+    const service = createActivityStream();
+    const pullRequest = createPullRequest({ latestCommit: 'a'.repeat(40), statusCommentId: 81 });
+    const repository = { forgeProvider: 'gitea', forgeInstance: 'https://gitea.example.test', forgeRepositoryId: '42' };
+    await service.updatePullRequestActivityStream(
+      createBuild({ status: BuildStatus.DEPLOYED }) as any,
+      [createDeploy({ publicUrl: 'https://api.example.test' })] as any,
+      pullRequest as any,
+      repository as any,
+      true,
+      true,
+      null,
+      false
+    );
+    expect(mockUpsertGiteaComment).toHaveBeenCalledWith(
+      { repository: { provider: 'gitea', instance: repository.forgeInstance, repositoryId: '42' }, number: 23 },
+      '<!-- lifecycle-status -->',
+      expect.stringContaining('https://api.example.test'),
+      81
+    );
+    expect(pullRequest.patch).toHaveBeenCalledWith({ statusCommentId: 99 });
+    expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
+  });
 });
 
 describe('ActivityStream comment overrides', () => {
