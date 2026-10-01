@@ -5,6 +5,7 @@ import type { GiteaDelivery } from 'server/lib/forge/giteaWebhook';
 const getRepository = jest.fn();
 const getPullRequest = jest.fn();
 const add = jest.fn();
+const enqueueBuildDeletion = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {}, defaultRedis: {}, defaultRedlock: {}, defaultQueueManager: {},
@@ -12,6 +13,10 @@ jest.mock('server/lib/dependencies', () => ({
 }));
 jest.mock('shared/config', () => ({ QUEUE_NAMES: { GITEA_WEBHOOK_PROCESSING: 'gitea-webhooks-test' } }));
 jest.mock('server/lib/logger', () => ({ getLogger: () => ({ info: jest.fn(), warn: jest.fn() }) }));
+jest.mock('../globalConfig', () => ({
+  __esModule: true,
+  default: { getInstance: () => ({ getLabels: async () => ({ deploy: ['lifecycle-deploy!'], disabled: ['lifecycle-disabled!'] }) }) },
+}));
 jest.mock('server/lib/authorityLock', () => ({
   withAuthorityLock: async ({ action }: { action: () => Promise<unknown> }) => ({ admitted: true, value: await action() }),
 }));
@@ -48,6 +53,7 @@ describe('Gitea current-state intake', () => {
     getPullRequest.mockReset().mockResolvedValue({
       id: { repository: identity, number: 17 }, title: 'Change', state: 'open',
       head: { repository: identity, sha: 'a'.repeat(40) }, headBranch: 'feature',
+      headRepository: { id: identity, fullName: 'example/app' },
       labels: ['lifecycle-deploy!'], author: 'author',
     });
     prPatch = jest.fn().mockResolvedValue(1);
@@ -57,10 +63,18 @@ describe('Gitea current-state intake', () => {
     };
     const repositoryQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(repository) })) };
     const prQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockImplementation(async () => existingPr) })) };
-    const db = { models: { Repository: { query: () => repositoryQuery }, PullRequest: { query: () => prQuery } } };
+    const buildQuery = { findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue({ id: 61 }) })) };
+    const db = {
+      models: {
+        Repository: { query: () => repositoryQuery }, PullRequest: { query: () => prQuery },
+        Build: { query: () => buildQuery },
+      },
+      services: { BuildService: { enqueueBuildDeletion } },
+    };
     const queueManager = { registerQueue: jest.fn(() => ({ add })) };
     service = new GiteaService(db as any, {} as any, {} as any, queueManager as any);
     add.mockReset().mockResolvedValue(undefined);
+    enqueueBuildDeletion.mockReset().mockResolvedValue(undefined);
   });
 
   afterAll(() => {
@@ -77,20 +91,53 @@ describe('Gitea current-state intake', () => {
     getPullRequest.mockResolvedValueOnce({
       id: { repository: identity, number: 17 }, title: 'Change', state: 'open',
       head: { repository: identity, sha: 'b'.repeat(40) }, headBranch: 'feature',
+      headRepository: { id: identity, fullName: 'example/app' },
       labels: ['lifecycle-deploy!'], author: 'author',
     });
     await service.processWebhooks({ data: { ...delivery, action: 'closed' } });
     expect(prPatch).toHaveBeenCalledWith(expect.objectContaining({
       status: 'open', latestCommit: 'b'.repeat(40), branchName: 'feature',
     }));
+    expect(enqueueBuildDeletion).not.toHaveBeenCalled();
+  });
+
+  it('retains the fork identity and queues teardown when the live PR is closed', async () => {
+    const fork = { provider: 'gitea', instance: identity.instance, repositoryId: '73' };
+    getPullRequest.mockResolvedValueOnce({
+      id: { repository: identity, number: 17 }, title: 'Change', state: 'closed',
+      head: { repository: fork, sha: 'c'.repeat(40) }, headBranch: 'feature',
+      headRepository: { id: fork, fullName: 'contributor/app' },
+      labels: ['lifecycle-deploy!'], author: 'author',
+    });
+    await service.processWebhooks({ data: { ...delivery, action: 'closed' } });
+    expect(prPatch).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'closed', deployOnUpdate: false, latestCommit: 'c'.repeat(40),
+      headForgeRepositoryId: '73', headRepositoryFullName: 'contributor/app',
+    }));
+    expect(enqueueBuildDeletion).toHaveBeenCalledWith({ id: 61 }, 'pull_request_closed');
+  });
+
+  it('queues teardown when the deploy label is removed from the live PR', async () => {
+    getPullRequest.mockResolvedValueOnce({
+      id: { repository: identity, number: 17 }, title: 'Change', state: 'open',
+      head: { repository: identity, sha: 'a'.repeat(40) }, headBranch: 'feature',
+      headRepository: { id: identity, fullName: 'example/app' },
+      labels: [], author: 'author',
+    });
+    await service.processWebhooks({ data: { ...delivery, action: 'labelled' } });
+    expect(prPatch).toHaveBeenCalledWith(expect.objectContaining({ deployOnUpdate: false }));
+    expect(enqueueBuildDeletion).toHaveBeenCalledWith({ id: 61 }, 'deploy_disabled');
   });
 
   it('marks a deleted PR closed and lets transient API errors retry', async () => {
     getPullRequest.mockRejectedValueOnce(new GiteaApiError(404));
     await service.processWebhooks({ data: delivery });
-    expect(prPatch).toHaveBeenCalledWith({ status: 'closed' });
+    expect(prPatch).toHaveBeenCalledWith({ status: 'closed', deployOnUpdate: false });
+    expect(enqueueBuildDeletion).toHaveBeenCalledWith({ id: 61 }, 'pull_request_closed');
 
+    enqueueBuildDeletion.mockClear();
     getPullRequest.mockRejectedValueOnce(new GiteaApiError(503));
     await expect(service.processWebhooks({ data: delivery })).rejects.toMatchObject({ status: 503 });
+    expect(enqueueBuildDeletion).not.toHaveBeenCalled();
   });
 });

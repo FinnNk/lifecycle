@@ -107,6 +107,12 @@ export default class PullRequestService extends BaseService {
       await pullRequest.$fetchGraph('repository');
 
       const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+      if (pullRequest.repository.forgeProvider === 'gitea') {
+        const currentLabels = new Set((pullRequest.labels || []).map((label) => label.toLowerCase()));
+        return pullRequest.status === 'open' &&
+          labelsConfig.deploy.every((label) => currentLabels.has(label.toLowerCase())) &&
+          !labelsConfig.disabled.some((label) => currentLabels.has(label.toLowerCase()));
+      }
       const hasLabel = await this.pullRequestHasLabelsAndState(
         pullRequest.pullRequestNumber,
         pullRequest.repository.githubInstallationId,
@@ -121,7 +127,7 @@ export default class PullRequestService extends BaseService {
         { error: e },
         'Failed to check lifecycle enabled for pull request'
       );
-      return true;
+      return pullRequest.repository?.forgeProvider === 'gitea' ? false : true;
     }
   }
 

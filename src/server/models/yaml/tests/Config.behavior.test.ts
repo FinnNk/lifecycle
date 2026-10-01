@@ -20,6 +20,17 @@ const mockLogger = {
   warn: jest.fn(),
 };
 
+const mockGiteaGetRepository = jest.fn();
+const mockGiteaGetFileAtCommit = jest.fn();
+
+jest.mock('server/lib/forge/gitea', () => ({
+  giteaConfigFromEnvironment: () => ({ baseUrl: 'https://gitea.example.test', token: 'token', username: 'bot', webhookSecrets: ['secret'] }),
+  GiteaProvider: jest.fn().mockImplementation(() => ({
+    getRepository: (...args: unknown[]) => mockGiteaGetRepository(...args),
+    getFileAtCommit: (...args: unknown[]) => mockGiteaGetFileAtCommit(...args),
+  })),
+}));
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => mockLogger),
 }));
@@ -140,6 +151,46 @@ describe('fetchLifecycleConfigByRepository', () => {
     jest.clearAllMocks();
     mockParseYamlConfigFromBranch.mockReset();
     mockValidate.mockReset();
+    mockGiteaGetRepository.mockReset();
+    mockGiteaGetFileAtCommit.mockReset();
+  });
+
+  it('loads a fork configuration only at the full PR commit SHA', async () => {
+    const sha = 'a'.repeat(40);
+    const gitea = {
+      fullName: 'example/app', forgeProvider: 'gitea',
+      forgeInstance: 'https://gitea.example.test', forgeRepositoryId: '42',
+    } as Repository;
+    mockGiteaGetRepository.mockResolvedValue({
+      id: { provider: 'gitea', instance: gitea.forgeInstance, repositoryId: '73' },
+      fullName: 'contributor/app',
+    });
+    mockGiteaGetFileAtCommit.mockResolvedValueOnce(null).mockResolvedValueOnce(
+      'version: 1.0.0\nenvironment: {}\nservices:\n  - name: api\n'
+    );
+
+    await expect(Config.fetchLifecycleConfigByRepository(gitea, sha, {
+      fullName: 'contributor/app', repositoryId: '73',
+    })).resolves.toMatchObject({ version: '1.0.0' });
+    expect(mockGiteaGetFileAtCommit).toHaveBeenNthCalledWith(1, 'contributor/app', sha, '.lifecycle.yaml');
+    expect(mockGiteaGetFileAtCommit).toHaveBeenNthCalledWith(2, 'contributor/app', sha, 'lifecycle.yaml');
+    expect(mockValidate).toHaveBeenCalled();
+  });
+
+  it('rejects a moving Gitea branch and a changed fork identity', async () => {
+    const gitea = {
+      fullName: 'example/app', forgeProvider: 'gitea',
+      forgeInstance: 'https://gitea.example.test', forgeRepositoryId: '42',
+    } as Repository;
+    await expect(Config.fetchLifecycleConfigByRepository(gitea, 'feature')).rejects.toThrow('exact commit SHA');
+    expect(mockGiteaGetRepository).not.toHaveBeenCalled();
+    mockGiteaGetRepository.mockResolvedValue({
+      id: { provider: 'gitea', instance: gitea.forgeInstance, repositoryId: '74' },
+    });
+    await expect(Config.fetchLifecycleConfigByRepository(gitea, 'b'.repeat(40), {
+      fullName: 'contributor/app', repositoryId: '73',
+    })).rejects.toThrow('source identity changed');
+    expect(mockGiteaGetFileAtCommit).not.toHaveBeenCalled();
   });
 
   it('parses and validates a repository branch', async () => {

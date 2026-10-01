@@ -70,6 +70,9 @@ export default class PullRequest extends Model {
   branchName: string;
   labels: string[];
   latestCommit: string;
+  /** Source repository of the PR head, which can be a fork of repository. */
+  headForgeRepositoryId: string | null;
+  headRepositoryFullName: string | null;
 
   static tableName = 'pull_requests';
   static timestamps = true;

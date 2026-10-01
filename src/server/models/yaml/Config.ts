@@ -22,6 +22,7 @@ import Repository from '../Repository';
 import { Environment } from './YamlEnvironment';
 import { Service, Service001 } from './YamlService';
 import { getLogger } from 'server/lib/logger';
+import { GiteaProvider, giteaConfigFromEnvironment } from 'server/lib/forge/gitea';
 
 export interface LifecycleConfig {
   readonly version: string;
@@ -58,19 +59,41 @@ export async function fetchLifecycleConfig(repositoryName: string, branchName: s
  */
 export async function fetchLifecycleConfigByRepository(
   repository: Repository,
-  branchName: string
+  branchName: string,
+  headRepository?: { fullName: string; repositoryId: string }
 ): Promise<LifecycleConfig> {
   let config: LifecycleConfig;
 
   if (repository != null) {
     try {
-      config = await new YamlConfigParser().parseYamlConfigFromBranch(repository.fullName, branchName);
+      if (repository.forgeProvider === 'gitea') {
+        if (!/^[0-9a-f]{40,64}$/i.test(branchName)) throw new Error('Gitea configuration requires an exact commit SHA');
+        const credentials = giteaConfigFromEnvironment();
+        if (!credentials) throw new Error('Gitea configuration is missing');
+        const provider = new GiteaProvider(credentials);
+        const sourceName = headRepository?.fullName ?? repository.fullName;
+        const source = await provider.getRepository(sourceName);
+        if (source.id.instance !== repository.forgeInstance ||
+            (headRepository && source.id.repositoryId !== headRepository.repositoryId) ||
+            (!headRepository && source.id.repositoryId !== repository.forgeRepositoryId)) {
+          throw new Error('Gitea configuration source identity changed');
+        }
+        let content: string | null = null;
+        for (const path of ['.lifecycle.yaml', 'lifecycle.yaml', '.lifecycle.yml', 'lifecycle.yml']) {
+          content = await provider.getFileAtCommit(sourceName, branchName, path);
+          if (content != null) break;
+        }
+        if (content == null) throw new Error('Gitea lifecycle configuration is missing at the PR commit');
+        config = new YamlConfigParser().parseYamlConfigFromString(content);
+      } else {
+        config = await new YamlConfigParser().parseYamlConfigFromBranch(repository.fullName, branchName);
+      }
     } catch (error) {
       getLogger({ repository: repository.fullName, branch: branchName }).warn({ error }, 'Config: fetch failed');
 
       if (error instanceof EmptyFileError) {
         config = null;
-      } else if (error instanceof ParsingError || error?.message?.includes('API rate limit exceeded')) {
+      } else if (repository.forgeProvider === 'gitea' || error instanceof ParsingError || error?.message?.includes('API rate limit exceeded')) {
         throw error;
       }
     }
