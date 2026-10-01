@@ -654,7 +654,9 @@ export default class DeployableService extends BaseService {
         await pullRequest.$fetchGraph('[build.[deploys.[deployable], environment], repository]');
         sourceRepository = pullRequest.repository;
         rootBranch = pullRequest.branchName;
-        rootBaseConfigRef = pullRequest.branchName;
+        rootBaseConfigRef = sourceRepository.forgeProvider === 'gitea'
+          ? pullRequest.latestCommit
+          : pullRequest.branchName;
         sourceBuild = pullRequest.build;
       } else if (build != null) {
         await build.$fetchGraph('[deploys.[deployable], environment]');
@@ -674,7 +676,10 @@ export default class DeployableService extends BaseService {
         const rootConfigRef = sourceRefTargetsRoot ? sourceRef : rootBaseConfigRef;
         const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
           sourceRepository,
-          rootConfigRef
+          rootConfigRef,
+          sourceRepository.forgeProvider === 'gitea' && pullRequest?.headRepositoryFullName && pullRequest?.headForgeRepositoryId
+            ? { fullName: pullRequest.headRepositoryFullName, repositoryId: pullRequest.headForgeRepositoryId }
+            : undefined
         );
 
         if (yamlConfig != null) {

@@ -209,6 +209,35 @@ describe('PullRequestService', () => {
   });
 
   describe('lifecycleEnabledForPullRequest', () => {
+    it('uses stored Gitea state and labels without calling GitHub', async () => {
+      const { service } = createService();
+      mockGetLabels.mockResolvedValue({ deploy: ['lifecycle-deploy!'], disabled: ['lifecycle-disabled!'] });
+      const pullRequest = {
+        status: 'open', labels: ['lifecycle-deploy!'],
+        repository: { forgeProvider: 'gitea' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      await expect(service.lifecycleEnabledForPullRequest(pullRequest as any)).resolves.toBe(true);
+      pullRequest.status = 'closed';
+      await expect(service.lifecycleEnabledForPullRequest(pullRequest as any)).resolves.toBe(false);
+      pullRequest.status = 'open';
+      pullRequest.labels.push('lifecycle-disabled!');
+      await expect(service.lifecycleEnabledForPullRequest(pullRequest as any)).resolves.toBe(false);
+      expect(mockGetPullRequest).not.toHaveBeenCalled();
+    });
+
+    it('fails closed for Gitea when label configuration cannot be read', async () => {
+      const { service } = createService();
+      mockGetLabels.mockRejectedValue(new Error('configuration unavailable'));
+      const pullRequest = {
+        status: 'open', labels: ['lifecycle-deploy!'],
+        repository: { forgeProvider: 'gitea' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      await expect(service.lifecycleEnabledForPullRequest(pullRequest as any)).resolves.toBe(false);
+      expect(mockGetPullRequest).not.toHaveBeenCalled();
+    });
+
     it('checks the configured deploy label against the pull request repository', async () => {
       const { service } = createService();
       const pullRequestHasLabelsAndState = jest.spyOn(service, 'pullRequestHasLabelsAndState').mockResolvedValue(false);

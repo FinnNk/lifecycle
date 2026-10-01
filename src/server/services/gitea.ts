@@ -5,6 +5,7 @@ import { getLogger } from 'server/lib/logger';
 import { redisClient } from 'server/lib/dependencies';
 import { QUEUE_NAMES } from 'shared/config';
 import { withAuthorityLock } from 'server/lib/authorityLock';
+import GlobalConfigService from './globalConfig';
 import BaseService from './_service';
 
 const DEDUPLICATION_SECONDS = 7 * 24 * 60 * 60;
@@ -62,17 +63,28 @@ export default class GiteaService extends BaseService {
           if (pr.id.repository.repositoryId !== forgeRepository.id.repositoryId) {
             throw new Error('Gitea PR belongs to a different repository');
           }
+          if (pr.head.repository.repositoryId !== pr.headRepository.id.repositoryId ||
+              pr.head.repository.instance !== forgeRepository.id.instance) {
+            throw new Error('Gitea PR head belongs to an unexpected repository');
+          }
+          const labels = await GlobalConfigService.getInstance().getLabels();
+          const currentLabels = new Set(pr.labels.map((label) => label.toLowerCase()));
+          const deployOnUpdate = pr.state === 'open' &&
+            labels.deploy.every((label) => currentLabels.has(label.toLowerCase())) &&
+            !labels.disabled.some((label) => currentLabels.has(label.toLowerCase()));
           const attributes = {
             repositoryId: repository.id,
             pullRequestNumber: delivery.pullRequestNumber,
             title: pr.title,
             status: pr.state,
             latestCommit: pr.head.sha,
+            headForgeRepositoryId: pr.head.repository.repositoryId,
+            headRepositoryFullName: pr.headRepository.fullName,
             branchName: pr.headBranch,
             fullName: forgeRepository.fullName,
             githubLogin: pr.author,
             labels: pr.labels,
-            deployOnUpdate: existing?.deployOnUpdate ?? false,
+            deployOnUpdate,
           };
           if (existing) await existing.$query().patch(attributes);
           else {
@@ -88,9 +100,12 @@ export default class GiteaService extends BaseService {
           }
           getLogger({ deliveryId: delivery.deliveryId, repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
             .info('Gitea: current pull request state stored');
+          if (!deployOnUpdate) await this.enqueueExistingBuildDeletion(repository.id, delivery.pullRequestNumber,
+            pr.state === 'closed' ? 'pull_request_closed' : 'deploy_disabled');
         } catch (error) {
           if (!(error instanceof GiteaApiError && error.status === 404 && existing)) throw error;
-          await existing.$query().patch({ status: 'closed' });
+          await existing.$query().patch({ status: 'closed', deployOnUpdate: false });
+          await this.enqueueExistingBuildDeletion(repository.id, delivery.pullRequestNumber, 'pull_request_closed');
           getLogger({ deliveryId: delivery.deliveryId, repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
             .info('Gitea: missing pull request marked closed');
         }
@@ -98,6 +113,17 @@ export default class GiteaService extends BaseService {
     });
     if (!result.admitted) throw new Error('Gitea PR reconciliation lock timed out');
   };
+
+  private async enqueueExistingBuildDeletion(repositoryId: number, pullRequestNumber: number, reason: string): Promise<void> {
+    const pullRequest = await this.db.models.PullRequest.query()
+      .findOne({ repositoryId, pullRequestNumber })
+      .whereNull('deletedAt');
+    if (!pullRequest) return;
+    const build = await this.db.models.Build.query()
+      .findOne({ pullRequestId: pullRequest.id })
+      .whereNull('deletedAt');
+    if (build) await this.db.services.BuildService.enqueueBuildDeletion(build, reason);
+  }
 
   private async findOrCreateRepository(
     forgeRepository: Awaited<ReturnType<GiteaProvider['getRepository']>>,
