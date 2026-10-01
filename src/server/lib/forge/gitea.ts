@@ -187,6 +187,7 @@ export class GiteaProvider implements ForgeProvider {
       url: new URL(`${repository.fullName}.git`, this.base).toString(),
       username: this.config.username,
       password: this.config.token,
+      ...(this.config.caFile ? { caPem: readFileSync(this.config.caFile, 'utf8') } : {}),
     };
   }
 

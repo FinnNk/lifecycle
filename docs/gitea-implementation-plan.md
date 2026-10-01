@@ -2,7 +2,7 @@
 
 Upstream baseline: `479a4a07476de474259580d8db59807770ca98da`.
 
-Current branch status: the forge adapter, native Gitea webhook route, retrying delivery queue and provider identity columns are implemented. The worker stores the live PR state, exact head SHA and source fork identity. It queues teardown for an existing build when the live PR is closed or loses its deploy label. Configuration lookup for a Gitea PR is pinned to its head SHA, including a source fork. The worker does not yet create or update builds, deploy, or post status comments. Configuring these variables does not enable Gitea environments.
+Current branch status: the forge adapter, native Gitea webhook route, retrying delivery queue and provider identity columns are implemented. The worker stores the live PR state, exact head SHA and source fork identity. It queues teardown for an existing build when the live PR is closed or loses its deploy label. Configuration lookup for a Gitea PR is pinned to its head SHA, including a source fork. The native builder can clone that fork at the stored SHA after checking the live PR, with credentials in an ephemeral Kubernetes Secret and the configured CA mounted into the clone container. The worker does not yet create or update builds, deploy, or post status comments. Configuring these variables does not enable Gitea environments.
 
 ## Existing path
 
@@ -16,8 +16,9 @@ Current branch status: the forge adapter, native Gitea webhook route, retrying d
 1. Introduce a small forge contract and Gitea adapter for authenticated repository/PR lookup, exact-SHA file content, clone access and idempotent status comments. Add raw-body signature verification and event mapping using Gitea's delivery and event-type headers. Keep the existing GitHub route and adapter behaviour.
 2. Add provider identity columns and a native Gitea webhook intake queue. Resolve each delivery against the current PR state, store its exact head SHA and exclude Gitea rows from the GitHub repository UI. Keep deployment disabled while the source and clone paths still assume GitHub.
 3. Record the PR head repository identity, read its configuration at the exact head SHA, use current labels for the Gitea cleanup gate and queue teardown for existing builds when the current PR closes or loses its deploy label. Keep build creation disabled until the source and clone paths are complete.
-4. Wire the stored Gitea PR to the existing build and deploy queues. Pin the native build and any Helm chart clone to the source repository and exact head SHA. Guard queued work against a closed or superseded PR. Adapt status comments and TTL checks through the forge boundary.
-5. Run the database migration and complete a local Gitea/Kubernetes open → deploy → update → close demonstration. Record configuration, commands, observed results, limitations and remaining GitHub-specific paths. Open a PR for each completed batch and wait for acceptance before merging.
+4. Pin a native build to the stored Gitea source fork and exact SHA. Check the live PR before cloning. Supply Git credentials and the configured CA through an ephemeral Kubernetes Secret. Preserve the GitHub native build path.
+5. Wire the stored Gitea PR to the existing build and deploy queues. Resolve source IDs without a GitHub repository ID, pin any Helm chart clone, and guard queued work against closure or a superseded head. Adapt status comments and TTL checks through the forge boundary.
+6. Run the database migration and complete a local Gitea/Kubernetes open → deploy → update → close demonstration. Record configuration, commands, observed results, limitations and remaining GitHub-specific paths. Open a PR for each completed batch and wait for acceptance before merging.
 
 The first release should support one onboarded repository and its PR lifecycle. Cross-repository YAML dependencies, Codefresh and agent workspace tooling remain GitHub-specific until a separate experiment establishes their Gitea requirements. The lab's Argo CD topology is outside this fork's change.
 
@@ -32,13 +33,15 @@ These variables are read by the Gitea adapter and webhook intake. The route is `
 | `GITEA_USERNAME` | Bot username for Git over HTTPS. |
 | `GITEA_WEBHOOK_SECRET` | Current HMAC secret. |
 | `GITEA_WEBHOOK_SECRET_PREVIOUS` | Optional previous secret during rotation. Remove it after deliveries signed with the old secret have drained. |
-| `GITEA_CA_FILE` | Optional PEM file for the API client's trusted CA. The future build clone path must trust the same CA separately. |
+| `GITEA_CA_FILE` | Optional PEM file for the API client and the native build clone container's trusted CA. |
 | `GITEA_ALLOW_HTTP` | Set to `true` only for a loopback demonstration without TLS. |
 | `GITEA_REPOSITORY` | The single allowed repository in `owner/name` form for this first release. |
 | `GITEA_ENVIRONMENT_ID` | ID of an existing Lifecycle environment to bind to the Gitea repository row. |
 
 The queue uses `X-Gitea-Delivery` as a deterministic job ID. Completed IDs remain for up to seven days or 100,000 jobs; a failed job is removed after five retry attempts so Gitea redelivery can requeue it. The worker fetches the current PR under a per-PR lock, so an old close delivery cannot overwrite a reopened PR's state. It stores no signed body in Redis or the database.
 
-The remaining integration conflict is in native Git clone, deployable source IDs, status comments and TTL checks: they directly use GitHub. The next experiment should build one service from one Gitea repository at a pinned SHA using the existing native builder, then extend only the provider lookups those paths require. Cross-repository dependencies and Codefresh can remain outside the first release.
+The native build service account needs permission to create and delete Secrets in each build namespace. The clone Secret contains the bot username, token and optional CA. It is deleted when the build finishes or fails; a worker crash can leave it behind until the namespace is removed. Job manifests contain only Secret references. The PR head is checked immediately before a native build; a later close or force-push still needs the existing build cancellation and reconciliation path to be fully connected.
+
+The remaining integration conflict is in deployable source IDs, Helm chart cloning, status comments and TTL checks: they still use GitHub. The next experiment should wire one native service from one Gitea PR into the existing build queue and resolve its source without a GitHub repository ID. Cross-repository dependencies and Codefresh can remain outside the first release.
 
 The intended minimum Gitea token scopes are `read:repository` for PR and exact-commit content reads and `write:issue` for the status comment. The bot also needs read access to the code unit of every private repository it builds, including a PR's source fork. Repository webhook administration can be performed separately by an administrator; the runtime token does not need that permission. These scopes follow [Gitea's API token permissions](https://docs.gitea.com/1.26/development/api-usage/) and [repository units](https://docs.gitea.com/1.24/usage/permissions/).
