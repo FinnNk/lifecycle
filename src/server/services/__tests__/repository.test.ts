@@ -107,6 +107,7 @@ class RepositoryQuery {
 function createRepository(overrides: Record<string, unknown> = {}) {
   const repository: any = {
     id: 1,
+    forgeProvider: 'github',
     githubRepositoryId: 12,
     githubInstallationId: 34,
     ownerId: 56,
@@ -196,6 +197,18 @@ describe('RepositoryService', () => {
   });
 
   describe('listOnboardedRepositories', () => {
+    test('keeps Gitea repositories out of the GitHub repository list', async () => {
+      repositories.push(
+        createRepository({ id: 1, fullName: 'example-org/api' }),
+        createRepository({ id: 2, forgeProvider: 'gitea', githubRepositoryId: null, githubInstallationId: null,
+          fullName: 'example-org/gitea-app' })
+      );
+
+      const result = await service.listOnboardedRepositories();
+
+      expect(result.repositories).toEqual([expect.objectContaining({ id: 1 })]);
+    });
+
     test('returns only non-deleted repository rows', async () => {
       repositories.push(
         createRepository({ id: 1, fullName: 'example-org/api' }),

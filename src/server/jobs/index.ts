@@ -54,6 +54,11 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 125,
   });
 
+  queueManager.registerWorker(QUEUE_NAMES.GITEA_WEBHOOK_PROCESSING, services.GiteaService.processWebhooks, {
+    connection: redisClient.getConnection(),
+    concurrency: 10,
+  });
+
   queueManager.registerWorker(QUEUE_NAMES.COMMENT_QUEUE, services.ActivityStream.processComments, {
     connection: redisClient.getConnection(),
     concurrency: 2,

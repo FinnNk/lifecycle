@@ -27,6 +27,7 @@ import Deployable from 'server/services/deployable';
 import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
 import GithubService from 'server/services/github';
+import GiteaService from 'server/services/gitea';
 import LabelService from 'server/services/label';
 import TTLCleanupService from 'server/services/ttlCleanup';
 import DeployCleanupService from 'server/services/deployCleanup';
@@ -37,6 +38,7 @@ export interface IServices {
   BuildService: BuildService;
   Environment: Environment;
   GithubService: GithubService;
+  GiteaService: GiteaService;
   PullRequest: PullRequest;
   Repository: Repository;
   Deploy: Deploy;
