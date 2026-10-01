@@ -23,6 +23,9 @@ const mockEnqueueBuildDeletion = jest.fn();
 const mockBuildQuery = jest.fn();
 const mockMetricsIncrement = jest.fn();
 const mockQueueAdd = jest.fn();
+const mockGiteaGetPullRequest = jest.fn();
+const mockGiteaReplaceLabels = jest.fn();
+const mockGiteaUpsertComment = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => ({
   CoreV1Api: jest.fn(),
@@ -61,6 +64,16 @@ jest.mock('server/lib/github', () => ({
   getPullRequestLabels: (...args: any[]) => mockGetPullRequestLabels(...args),
   updatePullRequestLabels: (...args: any[]) => mockUpdatePullRequestLabels(...args),
   createOrUpdatePullRequestComment: (...args: any[]) => mockCreateOrUpdatePullRequestComment(...args),
+}));
+
+jest.mock('server/lib/forge/gitea', () => ({
+  GiteaApiError: class GiteaApiError extends Error { constructor(readonly status: number) { super(`HTTP ${status}`); } },
+  giteaConfigFromEnvironment: () => ({ baseUrl: 'https://gitea.example.test', token: 'secret', username: 'bot' }),
+  GiteaProvider: jest.fn().mockImplementation(() => ({
+    getPullRequest: (...args: any[]) => mockGiteaGetPullRequest(...args),
+    replacePullRequestLabels: (...args: any[]) => mockGiteaReplaceLabels(...args),
+    upsertPullRequestComment: (...args: any[]) => mockGiteaUpsertComment(...args),
+  })),
 }));
 
 jest.mock('server/lib/utils', () => ({
@@ -164,8 +177,25 @@ describe('TTLCleanupService', () => {
     withGraphFetched: jest.fn().mockResolvedValue(build),
   });
 
+  const giteaBuild = () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const repository = { forgeProvider: 'gitea', forgeInstance: 'https://gitea.example.test',
+      forgeRepositoryId: '42', fullName: 'example/app' };
+    const build = { id: 456, uuid: 'open-sample-654321', status: 'deployed', isStatic: false,
+      pullRequest: { status: 'open', pullRequestNumber: 77, fullName: 'example/app',
+        labels: JSON.stringify(['sample-deploy']), repository, $query: jest.fn(() => ({ patch })) } };
+    const current = { id: { repository: { provider: 'gitea', instance: repository.forgeInstance,
+      repositoryId: repository.forgeRepositoryId }, number: 77 }, state: 'open', labels: ['sample-deploy'] };
+    mockExpiredNamespace('env-open-sample-654321');
+    mockBuildLookup(build);
+    mockGiteaGetPullRequest.mockResolvedValue(current);
+    return { build, current, patch };
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGiteaReplaceLabels.mockResolvedValue(undefined);
+    mockGiteaUpsertComment.mockResolvedValue(99);
     mockGetAllConfigs.mockResolvedValue({
       ttl_cleanup: {
         enabled: true,
@@ -247,6 +277,63 @@ describe('TTLCleanupService', () => {
       labels: JSON.stringify(['sample-disabled']),
     });
     expect(mockMetricsIncrement).toHaveBeenCalledWith('total', { dry_run: 'false' });
+  });
+
+  it('expires a Gitea lease using live labels and the existing deletion queue', async () => {
+    const { build, current, patch } = giteaBuild();
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+    expect(mockGiteaGetPullRequest).toHaveBeenCalledTimes(2);
+    expect(mockGiteaReplaceLabels).toHaveBeenCalledWith(current.id, ['sample-disabled']);
+    expect(patch).toHaveBeenCalledWith({ labels: JSON.stringify(['sample-disabled']), deployOnUpdate: false });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'deploy_disabled');
+    expect(mockGiteaUpsertComment).toHaveBeenCalledWith(current.id, '<!-- lifecycle-ttl -->',
+      'Tearing down lifecycle env since no activity in the past 7 days.');
+    expect(mockGetPullRequestLabels).not.toHaveBeenCalled();
+  });
+
+  it('honours a newly added Gitea keep label before changing an expired PR', async () => {
+    const { current } = giteaBuild();
+    mockGiteaGetPullRequest.mockResolvedValueOnce(current)
+      .mockResolvedValueOnce({ ...current, labels: ['sample-deploy', 'sample-keep'] });
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+    expect(mockGiteaReplaceLabels).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
+  });
+
+  it('tears down an expired Gitea PR that closed after the database snapshot', async () => {
+    const { build, current, patch } = giteaBuild();
+    mockGiteaGetPullRequest.mockResolvedValue({ ...current, state: 'closed' });
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+    expect(patch).toHaveBeenCalledWith({ status: 'closed', deployOnUpdate: false });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'ttl_closed_pull_request');
+    expect(mockGiteaReplaceLabels).not.toHaveBeenCalled();
+  });
+
+  it('does not delete a reopened Gitea PR from a stale closed database row', async () => {
+    const { build, current, patch } = giteaBuild();
+    build.pullRequest.status = 'closed';
+    mockGiteaGetPullRequest.mockResolvedValue({ ...current, labels: ['sample-deploy', 'sample-keep'] });
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ status: 'open' }));
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
+    expect(mockGiteaReplaceLabels).not.toHaveBeenCalled();
+  });
+
+  it('does not close the local deploy gate if Gitea rejects the label change', async () => {
+    const { patch } = giteaBuild();
+    mockGiteaReplaceLabels.mockRejectedValue(new Error('Gitea unavailable'));
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+    expect(patch).not.toHaveBeenCalledWith(expect.objectContaining({ deployOnUpdate: false }));
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
+  });
+
+  it('leaves a Gitea environment untouched when the live API fails', async () => {
+    giteaBuild();
+    mockGiteaGetPullRequest.mockRejectedValue(new Error('API unavailable'));
+    await expect(buildService().processTTLCleanupQueue({ data: {} } as any))
+      .rejects.toThrow('API unavailable');
+    expect(mockGiteaReplaceLabels).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   it('does not scan namespaces when TTL cleanup is disabled', async () => {

@@ -74,4 +74,14 @@ describe('Gitea provider', () => {
       'PATCH /repos/example/app/issues/comments/91',
     ]);
   });
+
+  it('replaces PR labels through Gitea issue labels using the stable repository ID', async () => {
+    const transport = jest.fn(async (_method: string, path: string) =>
+      path === '/repositories/42' ? repository : []);
+    const provider = new GiteaProvider(config, transport);
+    const id = { repository: { provider: 'gitea' as const, instance: 'https://gitea.example.test/git', repositoryId: '42' }, number: 17 };
+    await provider.replacePullRequestLabels(id, ['sample-disabled']);
+    expect(transport).toHaveBeenCalledWith('PUT', '/repos/example/app/issues/17/labels',
+      { labels: ['sample-disabled'] });
+  });
 });
