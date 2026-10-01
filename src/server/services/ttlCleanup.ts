@@ -26,6 +26,8 @@ import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
 import { DEFAULT_TTL_INACTIVITY_DAYS, DEFAULT_TTL_CHECK_INTERVAL_MINUTES, PullRequestStatus } from 'shared/constants';
 import GlobalConfigService from './globalConfig';
+import { GiteaApiError, GiteaProvider, giteaConfigFromEnvironment } from 'server/lib/forge/gitea';
+import type { ForgePullRequest } from 'server/lib/forge/types';
 
 interface TTLCleanupJob {
   dryRun?: boolean;
@@ -43,6 +45,30 @@ interface StaleEnvironment {
 }
 
 export default class TTLCleanupService extends Service {
+  private giteaProvider(): GiteaProvider {
+    const config = giteaConfigFromEnvironment();
+    if (!config) throw new Error('Gitea TTL cleanup requires Gitea configuration');
+    return new GiteaProvider(config);
+  }
+
+  private async currentGiteaPullRequest(pullRequest: PullRequest): Promise<ForgePullRequest | null> {
+    const repository = pullRequest.repository;
+    if (!repository?.forgeRepositoryId || !repository.forgeInstance) {
+      throw new Error('Gitea pull request repository identity is missing');
+    }
+    try {
+      const current = await this.giteaProvider().getPullRequest(repository.fullName, pullRequest.pullRequestNumber);
+      if (current.id.repository.repositoryId !== repository.forgeRepositoryId ||
+          current.id.repository.instance !== repository.forgeInstance) {
+        throw new Error('Gitea pull request repository identity changed');
+      }
+      return current;
+    } catch (error) {
+      if (error instanceof GiteaApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   /**
    * Queue for managing TTL cleanup operations
    */
@@ -228,6 +254,15 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
+        if (pullRequest.status !== PullRequestStatus.OPEN && pullRequest.repository?.forgeProvider === 'gitea') {
+          const current = await this.currentGiteaPullRequest(pullRequest);
+          if (current?.state === 'open') {
+            await pullRequest.$query().patch({ status: PullRequestStatus.OPEN, labels: JSON.stringify(current.labels) as any });
+            pullRequest.status = PullRequestStatus.OPEN;
+            pullRequest.labels = current.labels;
+          }
+        }
+
         if (pullRequest.status !== PullRequestStatus.OPEN) {
           getLogger().info(
             `TTL: found expired closed PR namespace=${nsName} pr=${pullRequest.pullRequestNumber} status=${pullRequest.status}`
@@ -246,11 +281,23 @@ export default class TTLCleanupService extends Service {
 
         let currentLabels: string[];
         try {
-          currentLabels = await getPullRequestLabels({
-            installationId: pullRequest.repository.githubInstallationId,
-            pullRequestNumber: pullRequest.pullRequestNumber,
-            fullName: pullRequest.fullName,
-          });
+          if (pullRequest.repository?.forgeProvider === 'gitea') {
+            const current = await this.currentGiteaPullRequest(pullRequest);
+            if (!current || current.state === 'closed') {
+              await pullRequest.$query().patch({ status: PullRequestStatus.CLOSED, deployOnUpdate: false });
+              pullRequest.status = PullRequestStatus.CLOSED;
+              staleEnvironments.push({ namespace: nsName, buildUUID, build, pullRequest, daysExpired,
+                currentLabels: parsePullRequestLabels(pullRequest.labels), hadLabelDrift: false });
+              continue;
+            }
+            currentLabels = current.labels;
+          } else {
+            currentLabels = await getPullRequestLabels({
+              installationId: pullRequest.repository.githubInstallationId,
+              pullRequestNumber: pullRequest.pullRequestNumber,
+              fullName: pullRequest.fullName,
+            });
+          }
 
           getLogger().debug(`Fetched ${currentLabels.length} labels from GitHub: ${currentLabels.join(', ')}`);
 
@@ -262,6 +309,7 @@ export default class TTLCleanupService extends Service {
             });
           }
         } catch (error) {
+          if (pullRequest.repository?.forgeProvider === 'gitea') throw error;
           getLogger().warn({ error }, 'TTL: GitHub labels fetch failed, using DB');
           currentLabels = parsePullRequestLabels(pullRequest.labels);
         }
@@ -356,6 +404,26 @@ export default class TTLCleanupService extends Service {
     const updatedLabels = currentLabels.filter((label) => label !== deployLabel).concat(disabledLabel);
 
     try {
+      if (repository.forgeProvider === 'gitea') {
+        const current = await this.currentGiteaPullRequest(pullRequest);
+        if (!current || current.state === 'closed') {
+          await pullRequest.$query().patch({ status: PullRequestStatus.CLOSED, deployOnUpdate: false });
+          await this.db.services.BuildService.enqueueBuildDeletion(build, 'ttl_closed_pull_request');
+          return;
+        }
+        const keepLabel = await getKeepLabel();
+        if (current.labels.includes(keepLabel) || current.labels.includes(disabledLabel)) return;
+        const liveLabels = current.labels.filter((label) => label !== deployLabel).concat(disabledLabel);
+        const provider = this.giteaProvider();
+        const id = current.id;
+        await provider.replacePullRequestLabels(id, liveLabels);
+        await pullRequest.$query().patch({ labels: JSON.stringify(liveLabels) as any, deployOnUpdate: false });
+        await this.db.services.BuildService.enqueueBuildDeletion(build, 'deploy_disabled');
+        const commentMessage = await this.generateCleanupComment(inactivityDays, commentTemplate);
+        await provider.upsertPullRequestComment(id, '<!-- lifecycle-ttl -->', commentMessage);
+        new Metrics('ttl.cleanup', { repositoryName: pullRequest.fullName }).increment('total', { dry_run: dryRun.toString() });
+        return;
+      }
       await updatePullRequestLabels({
         installationId: repository.githubInstallationId,
         pullRequestNumber: pullRequest.pullRequestNumber,

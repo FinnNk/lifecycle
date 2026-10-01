@@ -227,6 +227,17 @@ export class GiteaProvider implements ForgeProvider {
     }
   }
 
+  async replacePullRequestLabels(pr: ForgePullRequestId, labels: string[]): Promise<void> {
+    if (pr.repository.provider !== 'gitea' || pr.repository.instance !== this.repositoryId(Number(pr.repository.repositoryId)).instance) {
+      throw new Error('Pull request belongs to another forge');
+    }
+    if (!Number.isSafeInteger(pr.number) || pr.number < 1 || labels.some((label) => !label || typeof label !== 'string')) {
+      throw new Error('Invalid pull request labels');
+    }
+    const repo = await this.getRepositoryById(pr.repository);
+    await this.transport('PUT', `${pathFor(repo.fullName)}/issues/${pr.number}/labels`, { labels });
+  }
+
   private async getRepositoryById(id: ForgeRepositoryId): Promise<ForgeRepository> {
     // Gitea's issue-comment routes require owner/name; lookup by stable numeric ID
     // avoids persisting a mutable full name in the PR identity.
