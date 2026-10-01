@@ -968,6 +968,42 @@ describe('Deployable Service', () => {
       expect(deployableServices.size).toBe(1);
     });
 
+    test('pins a Gitea root service to the PR branch without a GitHub repository ID', async () => {
+      const repository = { forgeProvider: 'gitea', githubRepositoryId: null,
+        fullName: 'example-org/example-service' };
+      const build = { pullRequest: { repository }, enabledFeatures: [],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined) } as unknown as Build;
+      mockResolveRepositoryForAttributes.mockResolvedValue(repository);
+      const services = new Map<string, DeployableAttributes>();
+      await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        services, 100, 'unit-test-12345', githubService, null, 'feature-pr', true, null, build
+      );
+      expect(services.get('github-app')).toEqual(expect.objectContaining({
+        repositoryId: null, branchName: 'feature-pr',
+      }));
+      expect(mockResolveRepositoryForAttributes).not.toHaveBeenCalled();
+    });
+
+    test('rejects a Gitea source service from another repository', async () => {
+      const repository = { forgeProvider: 'gitea', githubRepositoryId: null, fullName: 'example-org/other' };
+      const build = { pullRequest: { repository }, enabledFeatures: [],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined) } as unknown as Build;
+      await expect(deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        new Map(), 100, 'unit-test-12345', githubService, null, 'feature-pr', true, null, build
+      )).rejects.toThrow('cross-repository');
+    });
+
+    test('rejects Helm before a Gitea build reaches the GitHub chart path', async () => {
+      const repository = { forgeProvider: 'gitea', githubRepositoryId: null,
+        fullName: 'example-org/example-service' };
+      const build = { pullRequest: { repository }, enabledFeatures: [],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined) } as unknown as Build;
+      await expect(deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        new Map(), 100, 'unit-test-12345', { name: 'chart', helm: {} } as any,
+        null, 'feature-pr', true, null, build
+      )).rejects.toThrow('only native source and Docker');
+    });
+
     test('falls back to the build pull-request repository and the default branch when repository resolution misses', async () => {
       const repository = { githubRepositoryId: 77, fullName: 'example-org/fallback' };
       const pullRequest = {
