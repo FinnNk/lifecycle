@@ -12,7 +12,25 @@ Configuration is read from `lifecycle.yaml` in the PR's source repository at the
 
 Use a dedicated Kubernetes cluster, PostgreSQL database, Redis instance, image registry and Gitea test repository. Give them names, network ports and storage distinct from the active lab. A separate host avoids resource contention; a second cluster on the same Docker host still shares CPU, memory and disk. Do not point Lifecycle at the lab's Argo CD applications, namespaces, database, Redis or registry. Keep the Kubernetes context explicit in every command.
 
-The usual Lifecycle prerequisites still apply: a runnable web process (`LIFECYCLE_MODE=web`) and job process (`LIFECYCLE_MODE=job`), their database and Redis connections, a usable build service account, registry access, ingress and an existing Lifecycle environment. The chart's web and worker Deployments read `app-secrets` through `envFrom`, but the checked-in local values and Tilt setup are GitHub-oriented. Supply the Gitea variables to **both** processes using a separately managed Secret or equivalent deployment configuration. If using a private CA, mount its PEM file at the same `GITEA_CA_FILE` path in both processes; the native build then passes that CA to its clone container. The chart does not currently provide a dedicated Gitea CA volume setting.
+The usual Lifecycle prerequisites still apply: a runnable web process (`LIFECYCLE_MODE=web`) and job process (`LIFECYCLE_MODE=job`), their database and Redis connections, a usable build service account, registry access, ingress and an existing Lifecycle environment. The chart's web and worker Deployments read `app-secrets` through `envFrom`, but the checked-in local values and Tilt setup are GitHub-oriented. Supply the Gitea variables to **both** processes using a separately managed Secret or equivalent deployment configuration. The chart can mount a private CA Secret into those two pods; the native build then passes that CA to its clone container.
+
+For a chart-based isolated installation, create a `lifecycle-gitea` Secret containing the Gitea variables below and add it to `global.envFrom` alongside the existing `app-secrets` and `app-config` entries. Do not remove the existing entries. If the Gitea certificate uses a private CA, also create a `lifecycle-gitea-ca` Secret with a `ca.pem` key and set the following chart values:
+
+```yaml
+global:
+  gitea:
+    caSecretName: lifecycle-gitea-ca
+    caSecretKey: ca.pem
+  envFrom:
+    - secretRef:
+        name: app-secrets
+    - configMapRef:
+        name: app-config
+    - secretRef:
+        name: lifecycle-gitea
+```
+
+The chart sets `GITEA_CA_FILE=/etc/lifecycle/gitea/ca.pem` for web and worker when `caSecretName` is set. Keep the CA Secret in the same namespace as those pods. Restart both Deployments after changing Secret-backed environment values. No Gitea Secret or CA mount is enabled by the default chart values.
 
 Apply migrations `036_add_forge_pr_identity` and `037_add_pr_head_forge_identity` to the **isolated** Lifecycle database before sending a webhook. From a configured Lifecycle checkout, `pnpm db:migrate` runs the pending migrations. Confirm the database target first; this command acts on whichever database the configured `APP_DB_*` variables or `DATABASE_URL` select. Use the normal Lifecycle setup to create an environment, then record its numeric ID for `GITEA_ENVIRONMENT_ID`.
 

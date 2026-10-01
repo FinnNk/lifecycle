@@ -16,6 +16,8 @@ limitations under the License.
 
 {{- range $name, $component := .Values.components }}
 {{- if $component.enabled }}
+{{- $gitea := $.Values.global.gitea | default dict }}
+{{- $giteaCASecret := and (or (eq $name "web") (eq $name "worker")) (get $gitea "caSecretName") }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -83,11 +85,21 @@ spec:
                 {{- toYaml .valueFrom | nindent 16 }}
               {{- end }}
             {{- end }}
+            {{- if $giteaCASecret }}
+            - name: GITEA_CA_FILE
+              value: /etc/lifecycle/gitea/ca.pem
+            {{- end }}
             - name: HELM_RELEASE_NAME
               value: {{ $.Release.Name }}
           {{- with $component.deployment.envFrom | default $.Values.global.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $giteaCASecret }}
+          volumeMounts:
+            - name: gitea-ca
+              mountPath: /etc/lifecycle/gitea
+              readOnly: true
           {{- end }}
           ports:
             {{- with $component.deployment.ports }}
@@ -105,5 +117,14 @@ spec:
             {{- with $component.deployment.resources }}
               {{- toYaml . | nindent 12 }}
             {{- end }}
+      {{- if $giteaCASecret }}
+      volumes:
+        - name: gitea-ca
+          secret:
+            secretName: {{ $giteaCASecret | quote }}
+            items:
+              - key: {{ get $gitea "caSecretKey" | default "ca.pem" | quote }}
+                path: ca.pem
+      {{- end }}
 {{- end }}
 {{- end }}
