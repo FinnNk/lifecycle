@@ -1991,6 +1991,31 @@ describe('DeployService uncovered public behavior', () => {
     expect(created.$setRelated).toHaveBeenCalledWith('build', build);
   });
 
+  test('Gitea source keeps a null GitHub ID and pins the deploy to the PR head', async () => {
+    const { service, db } = serviceHarness();
+    const patch = jest.fn().mockResolvedValue(1);
+    const created = { id: 4, $query: jest.fn(() => ({ patch })), $setRelated: jest.fn() };
+    const listQuery: any = { where: jest.fn(() => listQuery), withGraphFetched: jest.fn().mockResolvedValue([]) };
+    db.models.Deploy = {
+      query: jest.fn(() => listQuery), findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue(created),
+    };
+    db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'app.example.test') };
+    const build: any = {
+      id: 7, uuid: 'env',
+      pullRequest: { latestCommit: 'a'.repeat(40), repository: { forgeProvider: 'gitea' } },
+      deployables: [{ id: 11, name: 'app', repositoryId: null, branchName: 'feature',
+        active: true, type: DeployTypes.GITHUB }],
+      deploys: [created], $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await service.findOrCreateDeploys({} as any, build);
+
+    expect(db.models.Deploy.create).toHaveBeenCalledWith(expect.objectContaining({ githubRepositoryId: null }));
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ sha: 'a'.repeat(40) }));
+    expect(github.getShaForDeploy).not.toHaveBeenCalled();
+  });
+
   describe('repo-less dependencies', () => {
     const harnessWith = (existing: any[]) => {
       const { service, db } = serviceHarness();
@@ -3451,7 +3476,7 @@ describe('DeployService uncovered public behavior', () => {
 
     await expect(service.findOrCreateDeploys({} as any, build)).resolves.toEqual([]);
 
-    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables.[repository]]');
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables.[repository], pullRequest.[repository]]');
     expect(db.models.Deploy.query).not.toHaveBeenCalled();
     expect(mockLoggerError).toHaveBeenCalledWith('Deploy: build id missing for=findOrCreateDeploys');
   });

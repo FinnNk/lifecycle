@@ -58,8 +58,10 @@ export default class GiteaService extends BaseService {
           .findOne({ repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
           .whereNull('deletedAt');
 
+        let lookedUpPullRequest = false;
         try {
           const pr = await provider.getPullRequest(configuredRepository, delivery.pullRequestNumber);
+          lookedUpPullRequest = true;
           if (pr.id.repository.repositoryId !== forgeRepository.id.repositoryId) {
             throw new Error('Gitea PR belongs to a different repository');
           }
@@ -100,10 +102,40 @@ export default class GiteaService extends BaseService {
           }
           getLogger({ deliveryId: delivery.deliveryId, repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
             .info('Gitea: current pull request state stored');
-          if (!deployOnUpdate) await this.enqueueExistingBuildDeletion(repository.id, delivery.pullRequestNumber,
-            pr.state === 'closed' ? 'pull_request_closed' : 'deploy_disabled');
+          if (!deployOnUpdate) {
+            await this.enqueueExistingBuildDeletion(repository.id, delivery.pullRequestNumber,
+              pr.state === 'closed' ? 'pull_request_closed' : 'deploy_disabled');
+          } else {
+            // The PR row is the current authority. A retry after saving that row must
+            // still signal work, while repeated deliveries for the same head coalesce.
+            const stored = await this.db.models.PullRequest.query()
+              .findOne({ repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
+              .whereNull('deletedAt');
+            if (!stored) throw new Error('Gitea pull request was not stored');
+            let build = await this.db.models.Build.query()
+              .findOne({ pullRequestId: stored.id, environmentId })
+              .whereNull('deletedAt');
+            if (!build) {
+              await this.db.services.BuildService.createBuildAndDeploys({
+                repositoryId: repository.id,
+                repositoryBranchName: pr.headBranch,
+                pullRequestId: stored.id,
+                environmentId,
+              });
+              build = await this.db.models.Build.query()
+                .findOne({ pullRequestId: stored.id, environmentId })
+                .whereNull('deletedAt');
+              if (!build) throw new Error('Gitea build was not created');
+            }
+            await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+              buildId: build.id,
+              runUUID: `gitea-${repository.id}-${stored.id}-${pr.head.sha}${
+                existing?.deployOnUpdate === false || build.status === 'torn_down' ? `-${delivery.deliveryId}` : ''
+              }`,
+            });
+          }
         } catch (error) {
-          if (!(error instanceof GiteaApiError && error.status === 404 && existing)) throw error;
+          if (!(error instanceof GiteaApiError && error.status === 404 && existing && !lookedUpPullRequest)) throw error;
           await existing.$query().patch({ status: 'closed', deployOnUpdate: false });
           await this.enqueueExistingBuildDeletion(repository.id, delivery.pullRequestNumber, 'pull_request_closed');
           getLogger({ deliveryId: delivery.deliveryId, repositoryId: repository.id, pullRequestNumber: delivery.pullRequestNumber })
